@@ -2,6 +2,7 @@ import { LoggingLevel, LoggingLevelSchema } from '@modelcontextprotocol/sdk/type
 import { Command } from 'commander';
 import dotenv from 'dotenv';
 import tools from './tools/index.js';
+import { parseDelimitedList, parsePort, readBraveApiKeyFromFile } from './utils.js';
 
 dotenv.config({ debug: false, quiet: true });
 
@@ -24,18 +25,22 @@ type Configuration = {
   enabledTools: string[];
   disabledTools: string[];
   stateless: boolean;
+  allowedOrigins: string[];
+  allowedHosts: string[];
 };
 
 const state: Configuration & { ready: boolean } = {
   transport: 'stdio',
   port: 8080,
-  host: '0.0.0.0',
+  host: '127.0.0.1',
   braveApiKey: process.env.BRAVE_API_KEY ?? '',
   loggingLevel: 'info',
   ready: false,
   enabledTools: [],
   disabledTools: [],
   stateless: false,
+  allowedOrigins: [],
+  allowedHosts: [],
 };
 
 export function isToolPermittedByUser(toolName: string): boolean {
@@ -47,6 +52,11 @@ export function isToolPermittedByUser(toolName: string): boolean {
 export function getOptions(): Configuration | false {
   const program = new Command()
     .option('--brave-api-key <string>', 'Brave API key', process.env.BRAVE_API_KEY ?? '')
+    .option(
+      '--brave-api-key-file <string>',
+      'Path to file containing Brave API key',
+      process.env.BRAVE_API_KEY_FILE ?? ''
+    )
     .option('--logging-level <string>', 'Logging level', process.env.BRAVE_MCP_LOG_LEVEL ?? 'info')
     .option(
       '--transport <stdio|http>',
@@ -71,7 +81,17 @@ export function getOptions(): Configuration | false {
     .option(
       '--host <string>',
       'desired host for HTTP transport',
-      process.env.BRAVE_MCP_HOST ?? '0.0.0.0'
+      process.env.BRAVE_MCP_HOST ?? '127.0.0.1'
+    )
+    .option(
+      '--allowed-origins <origins...>',
+      'allowed Origin header values for HTTP transport (DNS rebinding protection)',
+      process.env.BRAVE_MCP_ALLOWED_ORIGINS ?? ''
+    )
+    .option(
+      '--allowed-hosts <hosts...>',
+      'allowed Host header values for HTTP transport (opt-in DNS rebinding protection)',
+      process.env.BRAVE_MCP_ALLOWED_HOSTS ?? ''
     )
     .option(
       '--stateless <boolean>',
@@ -117,20 +137,36 @@ export function getOptions(): Configuration | false {
     return false;
   }
 
-  if (!options.braveApiKey) {
+  const apiKeyFile =
+    typeof options.braveApiKeyFile === 'string' ? options.braveApiKeyFile.trim() : '';
+  let braveApiKey = typeof options.braveApiKey === 'string' ? options.braveApiKey.trim() : '';
+
+  if (apiKeyFile) {
+    const apiKeyFromFile = readBraveApiKeyFromFile(apiKeyFile);
+    if (!apiKeyFromFile.ok) {
+      console.error(`Error: ${apiKeyFromFile.error}`);
+      return false;
+    }
+
+    braveApiKey = apiKeyFromFile.key;
+  }
+
+  if (!braveApiKey) {
     console.error(
-      'Error: --brave-api-key is required. You can get one at https://brave.com/search/api/.'
+      'Error: A Brave API key is required via --brave-api-key, BRAVE_API_KEY, --brave-api-key-file, or BRAVE_API_KEY_FILE. You can get one at https://brave.com/search/api/.'
     );
     return false;
   }
 
   if (options.transport === 'http') {
-    if (options.port < 1 || options.port > 65535) {
+    const port = parsePort(options.port);
+    if (port === null) {
       console.error(
         `Invalid --port value: '${options.port}'. Must be a valid port number between 1 and 65535.`
       );
       return false;
     }
+    options.port = port;
 
     if (!options.host) {
       console.error('Error: --host is required');
@@ -140,9 +176,16 @@ export function getOptions(): Configuration | false {
 
   // Normalize stateless to boolean (CLI passes it as string)
   options.stateless = options.stateless === true || options.stateless === 'true';
+  options.braveApiKey = braveApiKey;
+
+  const allowedOrigins = parseDelimitedList(options.allowedOrigins);
+  options.allowedOrigins = allowedOrigins;
+
+  const allowedHosts = parseDelimitedList(options.allowedHosts);
+  options.allowedHosts = allowedHosts;
 
   // Update state
-  state.braveApiKey = options.braveApiKey;
+  state.braveApiKey = braveApiKey;
   state.transport = options.transport;
   state.port = options.port;
   state.host = options.host;
@@ -150,6 +193,8 @@ export function getOptions(): Configuration | false {
   state.enabledTools = enabledTools;
   state.disabledTools = disabledTools;
   state.stateless = options.stateless;
+  state.allowedOrigins = allowedOrigins;
+  state.allowedHosts = allowedHosts;
   state.ready = true;
 
   return options as Configuration;

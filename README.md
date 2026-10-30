@@ -62,7 +62,7 @@ Searches for videos with comprehensive metadata and thumbnail information.
 - `freshness` (string, optional): Time filter ("pd", "pw", "pm", "py", or date range)
 
 ### Image Search (`brave_image_search`)
-Searches for images with automatic fetching and base64 encoding for direct display.
+Searches for images with metadata including URLs, dimensions, and confidence scores.
 
 **Parameters:**
 - `query` (string, required): Search terms (max 400 chars, 50 words)
@@ -169,10 +169,13 @@ Retrieves pre-extracted web content optimized for AI agents, LLM grounding, and 
 
 The server supports the following environment variables:
 
-- `BRAVE_API_KEY`: Your Brave Search API key (required)
+- `BRAVE_API_KEY`: Your Brave Search API key (required unless `BRAVE_API_KEY_FILE` is set)
+- `BRAVE_API_KEY_FILE`: Path to a file containing your Brave Search API key. When set, this takes precedence over `BRAVE_API_KEY`. Useful for Docker secrets and similar mounted-secret setups.
 - `BRAVE_MCP_TRANSPORT`: Transport mode ("http" or "stdio", default: "stdio")
-- `BRAVE_MCP_PORT`: HTTP server port (default: 8000)
-- `BRAVE_MCP_HOST`: HTTP server host (default: "0.0.0.0")
+- `BRAVE_MCP_PORT`: HTTP server port (default: 8080)
+- `BRAVE_MCP_HOST`: HTTP server host (default: "127.0.0.1"). Binds to loopback only by default; set to "0.0.0.0" to expose the server on all interfaces (required inside containers and on Amazon Bedrock AgentCore). Only do this on a trusted network, since the HTTP endpoint is unauthenticated.
+- `BRAVE_MCP_ALLOWED_ORIGINS`: Space- or comma-separated list of additional `Origin` header values permitted for the HTTP transport. Loopback origins are always allowed; browser requests carrying any other `Origin` are rejected with HTTP 403 to guard against DNS rebinding. Set this when a browser-based client on a real domain needs access.
+- `BRAVE_MCP_ALLOWED_HOSTS`: Space- or comma-separated list of hostnames permitted in the `Host` header of the HTTP transport. Matching is on the hostname only and is case-insensitive; a numeric port in an entry (e.g. `mcp.example.com:8080`) is accepted but ignored for matching. Optional, opt-in defense-in-depth: when unset (default) the `Host` header is not validated, so reverse-proxy and custom-domain deployments are unaffected. When set, only loopback hosts and the listed hostnames are accepted; any other `Host` (including malformed/non-numeric ports) is rejected with HTTP 403.
 - `BRAVE_MCP_LOG_LEVEL`: Desired logging level("debug", "info", "notice", "warning", "error", "critical", "alert", or "emergency", default: "info")
 - `BRAVE_MCP_ENABLED_TOOLS`: When used, specifies a space-separated whitelist for supported tools
 - `BRAVE_MCP_DISABLED_TOOLS`: When used, specifies a space-separated blacklist for supported tools
@@ -184,10 +187,13 @@ The server supports the following environment variables:
 node dist/index.js [options]
 
 Options:
-  --brave-api-key <string>    Brave API key
+  --brave-api-key <string>        Brave API key
+  --brave-api-key-file <string>   Path to file containing Brave API key
   --transport <stdio|http>    Transport type (default: stdio)
   --port <number>             HTTP server port (default: 8080)
-  --host <string>             HTTP server host (default: 0.0.0.0)
+  --host <string>             HTTP server host (default: 127.0.0.1)
+  --allowed-origins <origins...>  Allowed Origin header values for HTTP transport (DNS rebinding protection)
+  --allowed-hosts <hosts...>  Allowed Host header values for HTTP transport (opt-in DNS rebinding protection)
   --logging-level <string>    Desired logging level (one of _debug_, _info_, _notice_, _warning_, _error_, _critical_, _alert_, or _emergency_)
   --enabled-tools             Tools whitelist (only the specified tools will be enabled)
   --disabled-tools            Tools blacklist (included tools will be disabled)
@@ -289,6 +295,44 @@ For manual installation, add the following to your User Settings (JSON) or `.vsc
 }
 ```
 
+### Usage with fx
+
+Add this to your `~/.fx/mcp.json`, creating the file if it does not exist:
+
+#### Docker
+
+```json
+{
+  "mcp": {
+    "brave-search": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "BRAVE_API_KEY", "docker.io/mcp/brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "YOUR_API_KEY_HERE"
+      }
+    }
+  }
+}
+```
+
+#### NPX
+
+```json
+{
+  "mcp": {
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@brave/brave-search-mcp-server", "--transport", "stdio"],
+      "env": {
+        "BRAVE_API_KEY": "YOUR_API_KEY_HERE"
+      }
+    }
+  }
+}
+```
+
+Start fx, or type `/mcp reload` if it is already running. To verify the connection, type `/mcp list`.
+
 ## Build
 
 ### Docker
@@ -350,29 +394,39 @@ Add a reference to your local build in `claude_desktop_config.json`:
 
 ### Testing via MCP Inspector
 
-1. Build and start the server:
+The Inspector requires Node 22.19 or newer.
+
+**STDIO** — the Inspector launches the server itself, so one terminal is enough:
+
 ```bash
 npm run build
-node dist/index.js
-```
-
-2. In another terminal, start the MCP Inspector:
-```bash
 npx @modelcontextprotocol/inspector node dist/index.js
 ```
 
-STDIO is the default mode. For HTTP mode testing, add `--transport http` to the arguments in the Inspector UI.
+**HTTP** — the Inspector connects to a URL, so the server must already be listening:
+
+```bash
+# terminal 1
+npm run serve:http
+
+# terminal 2
+npm run inspector:http
+```
+
+`serve:http` builds, binds `127.0.0.1:8080`, and reads `BRAVE_API_KEY` from `.env`.
 
 ### Available Scripts
 
 - `npm run build`: Build the TypeScript project
 - `npm run watch`: Watch for changes and rebuild
+- `npm test`: Run the test suite
 - `npm run format`: Format code with Prettier
 - `npm run format:check`: Check code formatting
 - `npm run prepare`: Format and build (runs automatically on npm install)
 
+- `npm run serve:http`: Build, then serve over HTTP at `http://127.0.0.1:8080/mcp`
 - `npm run inspector`: Launch an instance of MCP Inspector
-- `npm run inspector:stdio`: Launch a instance of MCP Inspector, configured for STDIO
+- `npm run inspector:http`: Launch MCP Inspector against `http://127.0.0.1:8080/mcp`
 
 ### Docker Compose
 
@@ -381,6 +435,26 @@ For local development with Docker:
 ```bash
 docker-compose up --build
 ```
+
+Set `BRAVE_API_KEY` (or `BRAVE_API_KEY_FILE`) in your shell or a `.env` file before starting the stack. The default `docker-compose.yml` also accepts `BRAVE_API_KEY_FILE` when the path is valid inside the container (for example, from a bind mount or Docker secret).
+
+#### Docker Compose secrets (optional)
+
+To avoid putting the API key in an environment variable, you can use [Docker Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/). The server reads the key from the path in `BRAVE_API_KEY_FILE`, which must exist inside the container.
+
+1. Copy the example secret file and add your key:
+
+```bash
+cp secrets/brave_api_key.txt.example secrets/brave_api_key.txt
+```
+
+2. Start the stack with the optional secrets override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.secrets.example.yml up --build
+```
+
+The override mounts the secret at `/run/secrets/brave_api_key` and sets `BRAVE_API_KEY_FILE` accordingly. See `docker-compose.secrets.example.yml` for the full configuration.
 
 ## License
 
